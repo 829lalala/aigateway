@@ -1,0 +1,24 @@
+# 接口契约：用户注册（AI 生成用例的输入源）
+# 契约 = 接口文档的结构化表达：字段、约束、响应、语义边界都写清楚，AI 才有据可依
+interface: POST /user/register
+description: 用户注册（JWT 通道的入口）
+request:
+  contentType: application/json
+  body:
+    username: "字符串，长度 3~32，唯一，不允许重复注册"
+    password: "字符串，长度 8~64"
+    email: "合法邮箱格式"
+responses:
+  success:
+    httpStatus: 200
+    body: { "code": 0, "message": "成功", "data": "userId" }
+  businessFailure:
+    httpStatus: 200
+    body: { "code": 400, "message": "参数校验失败或用户名已存在" }
+semanticRules:
+  - username 超过 32 位必须被参数校验拒绝（Bean Validation @Size）
+  - username 少于 3 位必须被拒绝
+  - password 少于 8 位必须被拒绝
+  - 必填字段缺失（username/password/email 任一为空）必须被拒绝
+  - 重复用户名注册必须返回业务失败（code 非 0）
+  - 登录失败消息统一，不区分"用户不存在"与"密码错误"（防用户枚举）

@@ -1,0 +1,33 @@
+# Java / Maven
+**/target/
+*.class
+
+# 本地配置与敏感信息
+.env
+**/application-local.properties
+**/config.local.properties
+
+# 日志与临时测试结果
+*.log
+*.jtl
+*.dump
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.trae/
+
+# 第三方工具发行版（Apache JMeter 本体，体积大且非项目代码）
+tools/
+
+# IDE 自动生成的钩子脚本
+.github/modernize/
+
+# 压测敏感数据：真实 API Key / 压测账号凭据（入库提供 .example 脱敏样例）
+test-platform/perf/stream-key.txt
+test-platform/perf/users.csv
+test-platform/perf/vt-keys.csv
+
+# JMeter HTML 报告产物（本地证据，含大量第三方静态资源）
+test-platform/perf/report/

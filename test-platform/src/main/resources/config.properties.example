@@ -1,0 +1,8 @@
+baseUrl=http://localhost:8080
+test.username=your-test-user
+test.password=your-test-password
+db.url=jdbc:mysql://localhost:3306/aigateway?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+db.user=root
+db.password=your-database-password
+ai.model=glm-4-flash
+ai.maxTokens=2000
