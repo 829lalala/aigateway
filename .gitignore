@@ -7,6 +7,9 @@
 **/application-local.properties
 **/config.local.properties
 
+# 简历（含个人信息，不入公共仓库）
+resume-*.md
+
 # 日志与临时测试结果
 *.log
 *.jtl
