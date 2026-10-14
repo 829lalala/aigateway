@@ -16,6 +16,12 @@ import org.springframework.stereotype.Component;
  *
  * 漂移告警：claimOne 返回 0 = Redis 额度>0 但码池已空——理论不该发生的双账本漂移，
  * 记 error 对账（不重试：没有码可发，重试无意义）
+ *
+ * 失败分层（阶段 20 DLT 补强）：
+ *   - 坏消息（非法 JSON / 缺 userId / userId 非法）：宽容解析跳过，ack 丢弃不重试
+ *     （重试一万次还是坏消息；与 SummaryConsumer.parse 语义对齐）
+ *   - 瞬时故障（DB 抖动等）：异常冒泡 → DefaultErrorHandler 重试 2 次 → 耗尽进
+ *     seize.gift.DLT 死信 topic（见 KafkaConsumerConfig）
  */
 @Slf4j
 @Component
@@ -28,7 +34,10 @@ public class GiftCodeConsumer {
 
     @KafkaListener(topics = GiftCodeService.SEIZE_TOPIC, groupId = "aigateway")
     public void onSeizeEvent(String message) {
-        Long userId = giftCodeService.parseUserId(message);
+        Long userId = parseUserIdQuietly(message);
+        if (userId == null) {
+            return; // 坏消息：不冒泡（留给重试/死信是浪费），warn 留痕后 ack 丢弃
+        }
 
         // ① 消费幂等：重复投递的消息直接跳过
         Long existing = giftCodeMapper.selectCount(new LambdaQueryWrapper<GiftCode>()
@@ -46,5 +55,22 @@ public class GiftCodeConsumer {
         }
 
         log.info("礼包码发放成功: userId={}", userId);
+    }
+
+    /**
+     * 宽容解析：非法 JSON / 缺 userId / userId 非法（<=0）返回 null（调用方据此丢弃）
+     *
+     * 为什么 catch 而非让 parseUserId 自己宽容：parseUserId 是 Service 层的
+     * "严格解析"契约（坏输入抛异常）；消费侧的"宽容取舍"是消费者自己的策略——
+     * 分开写让两层语义各自完整（阶段 20 D2）
+     */
+    private Long parseUserIdQuietly(String message) {
+        try {
+            Long userId = giftCodeService.parseUserId(message);
+            return (userId == null || userId <= 0) ? null : userId;
+        } catch (Exception e) {
+            log.warn("秒杀事件解析失败，丢弃坏消息: message={}, 原因={}", message, e.getMessage());
+            return null;
+        }
     }
 }

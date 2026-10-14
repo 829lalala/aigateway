@@ -188,7 +188,7 @@ public class SummaryService {
         log.info("AI 摘要生成成功: postId={}, receiptId={}, requestId={}", post.getId(), receiptId, requestId);
     }
 
-    /** 消费失败终态：DltHandler（17.3）重试耗尽后调用——FAILED + 原因 */
+    /** 消费失败终态：SummaryConsumer 重试耗尽后调用——FAILED + 原因 */
     public void markFailed(String receiptId, String reason) {
         SummaryReceipt update = new SummaryReceipt();
         update.setStatus(SummaryReceipt.FAILED);
