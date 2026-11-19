@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<jmeterTestPlan version="1.2" properties="5" jmeter="5.6.3">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="Seckill Load Test v2（业务码断言版）" enabled="true">
+      <stringProp name="TestPlan.comments">v2 相对 v1 的四处修正：① 删除计划内 ResultCollector（避免与 CLI -l 双写，吞吐分子虚高）；② ramp_time=0 真并发；③ 断言业务码而非 HTTP 状态码（0=成功 / 400=已抢 / 409=抢完，三者都是合法业务结果）；④ 增加 JSON 提取器把 code 写入 JTL，便于事后按业务结果分组出分位数。运行命令：jmeter -n -t seckill-v2.jmx -l results-v2.jtl -e -o report-v2</stringProp>
+      <boolProp name="TestPlan.functional_mode">false</boolProp>
+      <boolProp name="TestPlan.tearDown_on_shutdown">true</boolProp>
+      <boolProp name="TestPlan.serialize_threadgroups">false</boolProp>
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments" guiclass="ArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+        <collectionProp name="Arguments.arguments"/>
+      </elementProp>
+      <stringProp name="TestPlan.user_define_classpath"></stringProp>
+    </TestPlan>
+    <hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Seckill Users" enabled="true">
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller" enabled="true">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <stringProp name="LoopController.loops">1</stringProp>
+        </elementProp>
+        <stringProp name="ThreadGroup.num_threads">200</stringProp>
+        <!-- 关键修正 ②：ramp_time=0 表示 200 个线程同时启动，测的是真并发而非"1 秒内陆续启动" -->
+        <stringProp name="ThreadGroup.ramp_time">0</stringProp>
+        <boolProp name="ThreadGroup.scheduler">false</boolProp>
+        <stringProp name="ThreadGroup.duration">0</stringProp>
+        <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
+      </ThreadGroup>
+      <hashTree>
+        <CSVDataSet guiclass="TestBeanGUI" testclass="CSVDataSet" testname="users.csv" enabled="true">
+          <!-- 2026-11-18 修复：原为硬编码绝对路径 D:/young/.../users.csv，
+               换机器即失效。改为属性引用 ${__P(users.csv,users.csv)}：
+               默认取运行目录下的 users.csv，可用 -Jusers.csv=绝对路径 覆盖。
+               注意：users.csv 含真实凭据，已被 .gitignore 忽略；
+               仓库内只有 users.csv.example 结构样例。 -->
+          <stringProp name="filename">${__P(users.csv,users.csv)}</stringProp>
+          <stringProp name="fileEncoding">UTF-8</stringProp>
+          <stringProp name="variableNames">username,password,token</stringProp>
+          <boolProp name="ignoreFirstLine">true</boolProp>
+          <stringProp name="delimiter">,</stringProp>
+          <boolProp name="quotedData">false</boolProp>
+          <!-- recycle=false + stopThread=true：每个虚拟用户只领一次，保证"200 个不同身份" -->
+          <boolProp name="recycle">false</boolProp>
+          <boolProp name="stopThread">true</boolProp>
+          <stringProp name="shareMode">shareMode.all</stringProp>
+        </CSVDataSet>
+        <hashTree>
+          <!-- 关键修正 ⑤：同步定时器（Synchronizing Timer）。
+               它是一道「屏障（Barrier）」：先到的线程会原地等待，直到凑满 groupSize 个线程，
+               才全部同时放行。没有它，即使 ramp_time=0，线程也要经历"启动→读 CSV→建连"，
+               仍然会错开几百毫秒，产生不了真正的同时争抢。
+               groupSize=200 表示 200 个线程全部到齐才放行；timeoutInMs=5000 是安全阀，
+               5 秒内凑不齐也会放行，避免线程永久卡死。 -->
+          <SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="同步定时器（200 线程同时起跑）" enabled="true">
+            <intProp name="groupSize">200</intProp>
+            <longProp name="timeoutInMs">5000</longProp>
+          </SyncTimer>
+          <hashTree/>
+        </hashTree>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="POST /gift-codes/seize" enabled="true">
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+            <collectionProp name="Arguments.arguments">
+              <elementProp name="" elementType="HTTPArgument">
+                <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                <stringProp name="Argument.value">{}</stringProp>
+                <stringProp name="Argument.metadata">=</stringProp>
+              </elementProp>
+            </collectionProp>
+          </elementProp>
+          <stringProp name="HTTPSampler.domain">localhost</stringProp>
+          <stringProp name="HTTPSampler.port">8080</stringProp>
+          <stringProp name="HTTPSampler.protocol">http</stringProp>
+          <stringProp name="HTTPSampler.contentEncoding"></stringProp>
+          <stringProp name="HTTPSampler.path">/gift-codes/seize</stringProp>
+          <stringProp name="HTTPSampler.method">POST</stringProp>
+          <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+          <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
+          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>
+          <boolProp name="HTTPSampler.BROWSER_COMPATIBLE_MULTIPART">false</boolProp>
+          <boolProp name="HTTPSampler.image_parser">false</boolProp>
+          <boolProp name="HTTPSampler.concurrentDwn">false</boolProp>
+          <stringProp name="HTTPSampler.embedded_url_re"></stringProp>
+          <stringProp name="HTTPSampler.connect_timeout">5000</stringProp>
+          <stringProp name="HTTPSampler.response_timeout">30000</stringProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+          <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="HTTP Header Manager" enabled="true">
+            <collectionProp name="HeaderManager.headers">
+              <elementProp name="" elementType="Header">
+                <stringProp name="Header.name">Authorization</stringProp>
+                <stringProp name="Header.value">Bearer ${token}</stringProp>
+              </elementProp>
+              <elementProp name="" elementType="Header">
+                <stringProp name="Header.name">Content-Type</stringProp>
+                <stringProp name="Header.value">application/json</stringProp>
+              </elementProp>
+            </collectionProp>
+          </HeaderManager>
+          <hashTree/>
+          <!-- 关键修正 ③：只断言 HTTP 200（传输层），业务码由下面的 JSON 断言负责 -->
+          <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="HTTP 200" enabled="true">
+            <collectionProp name="Asserion.test_strings">
+              <stringProp name="49586">200</stringProp>
+            </collectionProp>
+            <stringProp name="Assertion.custom_message"></stringProp>
+            <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+            <boolProp name="Assertion.assume_success">false</boolProp>
+            <intProp name="Assertion.test_type">2</intProp>
+          </ResponseAssertion>
+          <hashTree/>
+          <!-- 关键修正 ③：业务码必须落在合法集合内。
+               0   = 领取成功
+               400 = 已抢过（重复参与）
+               409 = 已被抢完（库存尽）
+               任何其他值（如 500、null、1）= 系统故障，断言失败
+               注意（2026-11-18 修正）：此处必须写正则完整枚举 ^(0|400|409)$，
+               不能只写 0——JSONPathAssertion 在 ISREGEX=true 时是按正则**匹配该字段值**，
+               旧值 "0" 会因 "400"/"409" 中恰好含字符 0 而通过（子串巧合，非枚举），
+               同时会把 1001 这类含 0 的异常码误放行。 -->
+          <JSONPathAssertion guiclass="JSONPathAssertionGui" testclass="JSONPathAssertion" testname="业务码合法" enabled="true">
+            <stringProp name="JSON_PATH">$.code</stringProp>
+            <stringProp name="EXPECTED_VALUE">^(0|400|409)$</stringProp>
+            <boolProp name="JSONVALIDATION">true</boolProp>
+            <boolProp name="EXPECT_NULL">false</boolProp>
+            <boolProp name="INVERT">false</boolProp>
+            <boolProp name="ISREGEX">true</boolProp>
+            <boolProp name="ISFORMDATA">false</boolProp>
+          </JSONPathAssertion>
+          <hashTree/>
+          <!-- 关键修正 ④：把业务码与 message 提取成变量，随采样结果写入 JTL（需在 saveConfig 里开启 responseData 或改用 JSR223 后置处理器汇总） -->
+          <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="提取业务码" enabled="true">
+            <stringProp name="JSONPostProcessor.referenceNames">bizCode</stringProp>
+            <stringProp name="JSONPostProcessor.jsonPathExprs">$.code</stringProp>
+            <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+            <stringProp name="JSONPostProcessor.defaultValues">NULL</stringProp>
+          </JSONPostProcessor>
+          <hashTree/>
+        </hashTree>
+      </hashTree>
+      <!-- 关键修正 ①：此处不再放置 ResultCollector。
+           v1 的问题正是"计划内 ResultCollector 与 CLI -l 同指 results.jtl"，每请求写两行。
+           现在结果文件只由命令行 -l 参数创建，日志行数 == 唯一请求数，吞吐分子不再虚高。 -->
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>

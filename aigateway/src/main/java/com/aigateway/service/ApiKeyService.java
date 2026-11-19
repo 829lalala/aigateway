@@ -143,16 +143,31 @@ public class ApiKeyService {
         String cacheKey = CACHE_KEY_PREFIX + hash;
 
         // ① 查缓存：命中则完全不碰 MySQL
-        String cached = stringRedisTemplate.opsForValue().get(cacheKey);
+        //    Redis 故障时走降级（E 项修复）：鉴权层选择 fail-open——缓存是加速层，
+        //    它不可用不应该让整个 /chat 不可用。降级后每次都查 MySQL，只是变慢。
+        String cached;
+        try {
+            cached = stringRedisTemplate.opsForValue().get(cacheKey);
+        } catch (Exception e) {
+            log.warn("Redis 不可用，API Key 校验降级为直查数据库（fail-open）: {}", e.getMessage());
+            return queryDatabase(hash);
+        }
         if (cached != null) {
             return cachedSnapshot(cached);
         }
 
         // ② 未命中 → 【防击穿】互斥重建：SET NX EX 抢锁，只放一个线程去查库回填
+        //    抢锁本身也可能因 Redis 故障失败，同样降级为直查库
         String lockKey = CACHE_KEY_PREFIX + "lock:" + hash;
         String lockToken = UUID.randomUUID().toString();
-        Boolean locked = stringRedisTemplate.opsForValue()
-                .setIfAbsent(lockKey, lockToken, Duration.ofSeconds(3)); // 锁自带 TTL，持锁者崩溃也不会死锁
+        Boolean locked;
+        try {
+            locked = stringRedisTemplate.opsForValue()
+                    .setIfAbsent(lockKey, lockToken, Duration.ofSeconds(3)); // 锁自带 TTL，持锁者崩溃也不会死锁
+        } catch (Exception e) {
+            log.warn("Redis 不可用，跳过互斥重建直接查库（fail-open）: {}", e.getMessage());
+            return queryDatabase(hash);
+        }
         if (Boolean.TRUE.equals(locked)) {
             try {
                 // 双重检查：抢锁排队期间，可能别的请求已经重建完了
@@ -173,10 +188,19 @@ public class ApiKeyService {
                 stringRedisTemplate.opsForValue().set(cacheKey, CACHE_JSON.writeValueAsString(snapshot), ttl);
                 log.info("API Key 缓存未命中，已回填: cacheKey={}, TTL={}s", cacheKey, ttl.toSeconds());
                 return Optional.of(snapshot);
+            } catch (Exception e) {
+                // 持锁期间 Redis 故障（读双重检查或回填失败）：仍然返回已查到的库结果，
+                // 不能让"回填缓存失败"变成"鉴权失败"
+                log.warn("持锁期间 Redis 异常，降级为直查数据库（fail-open）: {}", e.getMessage());
+                return queryDatabase(hash);
             } finally {
                 // 释放互斥锁。进阶认知：严格实现应"比对 token 再删"（Lua 原子执行），
                 // 防止自己的锁过期后误删别人的锁；本场景持锁仅数毫秒、锁 TTL 3 秒，风险可忽略
-                stringRedisTemplate.delete(lockKey);
+                try {
+                    stringRedisTemplate.delete(lockKey);
+                } catch (Exception e) {
+                    log.warn("释放互斥锁失败（Redis 不可用），锁将在 3 秒 TTL 后自动过期: {}", e.getMessage());
+                }
             }
         }
 
@@ -187,10 +211,26 @@ public class ApiKeyService {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-        cached = stringRedisTemplate.opsForValue().get(cacheKey);
+        try {
+            cached = stringRedisTemplate.opsForValue().get(cacheKey);
+        } catch (Exception e) {
+            log.warn("Redis 不可用，跳过缓存复查直接查库（fail-open）: {}", e.getMessage());
+            return queryDatabase(hash);
+        }
         if (cached != null) {
             return cachedSnapshot(cached);
         }
+        return queryDatabase(hash);
+    }
+
+    /**
+     * 直查数据库（Redis 不可用时的降级路径）
+     *
+     * 设计依据：缓存是加速层不是必需组件。Redis 故障时鉴权仍然必须可用，
+     * 否则 /chat 会在第一道关卡就整体失败——注释第 184 行早已写下这个承诺，
+     * 本方法把它落实到代码（E 项修复）。
+     */
+    private Optional<ApiKeySnapshot> queryDatabase(String hash) {
         ApiKey db = apiKeyMapper.selectOne(new LambdaQueryWrapper<ApiKey>()
                 .eq(ApiKey::getApiKeyHash, hash));
         return db == null ? Optional.empty() : Optional.of(toSnapshot(db));

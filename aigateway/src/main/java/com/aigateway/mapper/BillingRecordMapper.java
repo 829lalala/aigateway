@@ -3,6 +3,8 @@ package com.aigateway.mapper;
 import com.aigateway.entity.BillingRecord;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Select;
 
 /**
  * 计费流水数据访问接口（DAO 层）
@@ -14,4 +16,8 @@ import org.apache.ibatis.annotations.Mapper;
  */
 @Mapper
 public interface BillingRecordMapper extends BaseMapper<BillingRecord> {
+
+    /** 必须在事务中调用：锁定账单，串行处理同一账单的结算和释放。 */
+    @Select("SELECT * FROM billing_record WHERE id = #{id} AND deleted = 0 FOR UPDATE")
+    BillingRecord selectByIdForUpdate(@Param("id") Long id);
 }

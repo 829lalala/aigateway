@@ -19,6 +19,14 @@ import java.time.LocalDateTime;
 @TableName("billing_record")
 public class BillingRecord {
 
+    /** 账单状态：处理中、已结算、已释放、待人工核对 */
+    public enum Status {
+        PROCESSING,
+        SETTLED,
+        RELEASED,
+        RECONCILIATION_REQUIRED
+    }
+
     /** 主键：跟随数据库自增 */
     @TableId(type = IdType.AUTO)
     private Long id;
@@ -49,6 +57,21 @@ public class BillingRecord {
 
     /** 扣费后余额快照：流水按时间重放可重建任意时刻余额（对账/追责基石） */
     private Long balanceAfter;
+
+    /** 请求状态，决定重试、结算和恢复动作 */
+    private Status status;
+
+    /** 本次请求冻结的金额，单位：万分之一元 */
+    private Long frozenAmount;
+
+    /** 实际结算费用，单位：万分之一元；处理中时为空 */
+    private Long actualCost;
+
+    /** 结算完成时间 */
+    private LocalDateTime settledTime;
+
+    /** 待核对或释放失败的原因，禁止写入密码和完整请求内容 */
+    private String failureReason;
 
     /** 逻辑删除标记（流水表正常业务不用，保留以对齐项目约定） */
     @TableLogic

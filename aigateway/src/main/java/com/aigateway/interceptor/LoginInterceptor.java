@@ -1,6 +1,9 @@
 package com.aigateway.interceptor;
 
 import com.aigateway.common.UserContext;
+import com.aigateway.common.AdminOnly;
+import com.aigateway.entity.User;
+import com.aigateway.mapper.UserMapper;
 import com.aigateway.util.JwtUtil;
 import io.jsonwebtoken.Claims;
 import jakarta.servlet.http.HttpServletRequest;
@@ -8,6 +11,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.HandlerInterceptor;
+import org.springframework.web.method.HandlerMethod;
 
 import java.nio.charset.StandardCharsets;
 
@@ -22,6 +26,7 @@ import java.nio.charset.StandardCharsets;
 public class LoginInterceptor implements HandlerInterceptor {
 
     private final JwtUtil jwtUtil;
+    private final UserMapper userMapper;
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
@@ -38,8 +43,30 @@ public class LoginInterceptor implements HandlerInterceptor {
             return reject(response, 401, "令牌无效或已过期");
         }
 
+        Long userId;
+        try {
+            userId = Long.valueOf(claims.getSubject());
+            if (userId <= 0) {
+                return reject(response, 401, "令牌用户信息无效");
+            }
+        } catch (NumberFormatException e) {
+            return reject(response, 401, "令牌用户信息无效");
+        }
+
+        // 管理接口每次查数据库中的当前角色，降级后旧令牌不能继续使用管理权限。
+        // 在写入请求上下文前拒绝，避免本拦截器返回 false 时没有清理回调而留下用户信息。
+        if (handler instanceof HandlerMethod method
+                && (method.hasMethodAnnotation(AdminOnly.class)
+                || method.getBeanType().isAnnotationPresent(AdminOnly.class))) {
+            User user = userMapper.selectById(userId);
+            if (user == null || Integer.valueOf(1).equals(user.getDeleted())
+                    || !Integer.valueOf(1).equals(user.getRole())) {
+                return reject(response, 403, "需要管理员权限");
+            }
+        }
+
         // 3. 身份写入 ThreadLocal，本请求链路内任何代码可通过 UserContext 取用
-        UserContext.setUserId(Long.valueOf(claims.getSubject()));
+        UserContext.setUserId(userId);
         return true; // true = 放行进入 Controller
     }
 
@@ -50,12 +77,12 @@ public class LoginInterceptor implements HandlerInterceptor {
     }
 
     /**
-     * 写出统一格式的 401 响应
+     * 写出统一格式的认证或权限错误响应
      * 此处手拼 JSON：固定结构 {"code":401,"message":"...","data":null}，
      * 简单场景不值得引入序列化框架（message 含中文，UTF-8 直接输出即可）
      */
     private boolean reject(HttpServletResponse response, int code, String message) throws Exception {
-        response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+        response.setStatus(code);
         response.setContentType("application/json");
         response.setCharacterEncoding(StandardCharsets.UTF_8.name());
         response.getWriter().write(

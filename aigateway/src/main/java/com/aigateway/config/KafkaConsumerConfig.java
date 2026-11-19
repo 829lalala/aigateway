@@ -61,4 +61,20 @@ public class KafkaConsumerConfig {
         factory.setCommonErrorHandler(kafkaErrorHandler);
         return factory;
     }
+
+    /** 死信入库失败不再生成 .DLT.DLT；保持当前位置，每五秒重试直到数据库恢复。 */
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<Object, Object> deadLetterKafkaListenerContainerFactory(
+            ConcurrentKafkaListenerContainerFactoryConfigurer configurer,
+            ConsumerFactory<Object, Object> consumerFactory) {
+        var factory = new ConcurrentKafkaListenerContainerFactory<Object, Object>();
+        configurer.configure(factory, consumerFactory);
+        var handler = new DefaultErrorHandler(new FixedBackOff(5000L, FixedBackOff.UNLIMITED_ATTEMPTS));
+        // 死信保存的所有异常都不能被当作不可重试错误跳过。
+        handler.setClassifications(java.util.Map.of(), true);
+        factory.setCommonErrorHandler(handler);
+        factory.getContainerProperties().setAckMode(
+                org.springframework.kafka.listener.ContainerProperties.AckMode.RECORD);
+        return factory;
+    }
 }

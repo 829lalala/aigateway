@@ -16,10 +16,13 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Propagation;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.time.LocalDateTime;
 
 /**
  * 计费业务层：余额预检、原子扣费、幂等判重（阶段 5 核心）
@@ -99,11 +102,55 @@ public class BillingService {
         return billedK * priceFor(model);
     }
 
+    /** 指纹算法版本：v2 起把 maxTokens 与 stream 纳入指纹（v1 只有 appId|model|messages） */
+    private static final String HASH_VERSION = "v2";
+
     /**
      * 请求参数指纹：同键不同参数 = 客户端 bug/攻击，要能和"真重试"区分开
+     *
+     * 为什么必须包含 maxTokens 与 stream（v2 修复）：
+     *   上游调用发生在 deduct 之前，所以"幂等命中"只阻止扣费、不阻止再次调用模型。
+     *   若指纹不含 maxTokens，同一 requestId 用 max_tokens=16 提交一次、再用 4000 重提，
+     *   第二次仍会真实调用上游并拿到 4000 token 的响应，却被判为幂等命中而不扣费——
+     *   这是一个白嫖窗口（花一份钱拿两份 token）。
+     *   同理 stream 决定计费路径（流式断连按文本估算），两条路径必须是不同的业务。
+     *
+     * 归一化（normalize）：null 的 maxTokens 按默认值算、null 的 stream 按 false 算，
+     *   否则"显式传 false"与"不传"会产生两个指纹，把同一次重试误判成冲突。
      */
-    public String buildRequestHash(Long appId, String model, String messagesJson) {
+    public String buildRequestHash(Long appId, String model, Integer maxTokens, Boolean stream,
+                                   String messagesJson) {
+        long normalizedMaxTokens = maxTokens == null ? DEFAULT_MAX_TOKENS : maxTokens;
+        boolean normalizedStream = Boolean.TRUE.equals(stream);
+        return apiKeyGenerator.sha256Hex(HASH_VERSION + "|" + appId + "|" + model + "|"
+                + normalizedMaxTokens + "|" + normalizedStream + "|" + messagesJson);
+    }
+
+    /**
+     * v1 旧指纹（不含 maxTokens / stream）：仅用于识别升级前的历史流水。
+     *
+     * 兼容性说明：数据库里已存在的账单是 v1 指纹。若只认 v2，那些历史请求一旦重试
+     * 就会被误判为"同键不同业务"返回 409。因此比对时同时接受 v1 与 v2，
+     * 但新写入的流水一律用 v2。
+     */
+    private String buildLegacyRequestHash(Long appId, String model, String messagesJson) {
         return apiKeyGenerator.sha256Hex(appId + "|" + model + "|" + messagesJson);
+    }
+
+    /**
+     * 指纹比对：优先 v2；不匹配时回落到 v1，兼容升级前的历史流水。
+     *
+     * @return true = 指纹一致（可幂等命中）；false = 同键不同业务，应拒绝
+     */
+    private boolean requestHashMatches(String storedHash, String currentHash, String legacyHash) {
+        if (Objects.equals(storedHash, currentHash)) {
+            return true;
+        }
+        if (Objects.equals(storedHash, legacyHash)) {
+            log.warn("命中 v1 旧指纹（历史流水），建议该请求后续改用 v2 指纹: storedHash 与当前算法不一致");
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -127,6 +174,176 @@ public class BillingService {
         long outputTokens = maxTokens == null ? DEFAULT_MAX_TOKENS : maxTokens;
         long billedK = (outputTokens + PROMPT_BUFFER_TOKENS + 999) / 1000;
         return billedK * maxChainPrice();
+    }
+
+    /**
+     * 创建处理中账单并冻结金额。
+     *
+     * 该方法只操作 MySQL，不调用模型和 Redis：数据库事务很短，外部网络调用由上层在事务外执行。
+     * 同一请求编号重复提交时返回原账单；参数指纹不同则拒绝，避免一个幂等键代表两笔业务。
+     */
+    @Transactional
+    public BillingRecord createPending(Long appId, Long userId, String requestId,
+                                       String requestModel, String messagesJson,
+                                       long frozenAmount) {
+        if (appId == null || userId == null || requestId == null || requestId.isBlank()) {
+            throw new BizException(400, "计费请求身份信息不能为空");
+        }
+        if (frozenAmount <= 0) {
+            throw new BizException(400, "冻结金额必须大于零");
+        }
+
+        String requestHash = buildRequestHash(appId, requestModel, null, null, messagesJson);
+        String legacyHash = buildLegacyRequestHash(appId, requestModel, messagesJson);
+        BillingRecord existing = billingRecordMapper.selectOne(new LambdaQueryWrapper<BillingRecord>()
+                .eq(BillingRecord::getAppId, appId)
+                .eq(BillingRecord::getRequestId, requestId));
+        if (existing != null) {
+            if (!requestHashMatches(existing.getRequestHash(), requestHash, legacyHash)) {
+                throw new BizException(409, "幂等键冲突：同一 Request-Id 被不同请求使用");
+            }
+            existing.setIdempotentHit(true);
+            return existing;
+        }
+
+        int frozen = userMapper.freezeBalance(userId, frozenAmount);
+        if (frozen == 0) {
+            throw new BizException(403, "可用余额不足，请先充值");
+        }
+
+        BillingRecord pending = new BillingRecord();
+        pending.setRequestId(requestId);
+        pending.setRequestHash(requestHash);
+        pending.setAppId(appId);
+        pending.setUserId(userId);
+        pending.setModel(requestModel);
+        pending.setCost(0L);
+        pending.setBalanceAfter(null);
+        pending.setStatus(BillingRecord.Status.PROCESSING);
+        pending.setFrozenAmount(frozenAmount);
+        pending.setActualCost(null);
+        try {
+            billingRecordMapper.insert(pending);
+        } catch (DuplicateKeyException e) {
+            // 唯一索引冲突会让本事务回滚，刚才的冻结不会遗留；调用方复用请求编号重试即可。
+            log.warn("并发创建处理中账单发生幂等冲突: requestId={}", requestId);
+            throw new BizException(409, "幂等键冲突，请复用原请求重试");
+        }
+        pending.setIdempotentHit(false);
+        log.info("创建处理中账单并冻结金额: requestId={}, userId={}, frozenAmount={}",
+                requestId, userId, frozenAmount);
+        return pending;
+    }
+
+    /** 结算处理中账单：总余额扣实际费用，同时解除该请求的全部冻结。 */
+    @Transactional
+    public BillingRecord settlePending(Long recordId, long actualCost) {
+        if (actualCost < 0) {
+            throw new BizException(400, "实际费用不能为负数");
+        }
+        BillingRecord record = lockRecord(recordId);
+        if (record.getStatus() == BillingRecord.Status.SETTLED) {
+            if (!Objects.equals(record.getActualCost(), actualCost)) {
+                throw new BizException(409, "账单已结算，不能修改实际费用");
+            }
+            return record;
+        }
+        requireProcessing(record);
+        long frozen = record.getFrozenAmount();
+        if (actualCost > frozen) {
+            throw new BizException(409, "实际费用超过冻结金额，请核对账务");
+        }
+        if (userMapper.settleFrozenBalance(record.getUserId(), frozen, actualCost) != 1) {
+            throw new BizException(409, "账户余额或冻结金额异常，请核对账务");
+        }
+        User user = userMapper.selectById(record.getUserId());
+        if (user == null || user.getBalance() == null) {
+            throw new BizException(409, "无法取得结算余额，事务回滚");
+        }
+        record.setCost(actualCost);
+        record.setActualCost(actualCost);
+        record.setBalanceAfter(user.getBalance());
+        record.setSettledTime(LocalDateTime.now());
+        record.setStatus(BillingRecord.Status.SETTLED);
+        record.setFailureReason(null);
+        persistTransition(record);
+        return record;
+    }
+
+    /** 仅在确认没有消费时调用：解除冻结，不扣总余额。 */
+    @Transactional
+    public BillingRecord releasePending(Long recordId, String reason) {
+        if (reason == null || reason.isBlank() || reason.length() > 500) {
+            throw new BizException(400, "释放原因不能为空且不能超过500个字符");
+        }
+        BillingRecord record = lockRecord(recordId);
+        if (record.getStatus() == BillingRecord.Status.RELEASED) {
+            return record;
+        }
+        requireProcessing(record);
+        if (userMapper.releaseFrozenBalance(record.getUserId(), record.getFrozenAmount()) != 1) {
+            throw new BizException(409, "账户冻结金额异常，请核对账务");
+        }
+        record.setCost(0L);
+        record.setActualCost(0L);
+        record.setStatus(BillingRecord.Status.RELEASED);
+        record.setFailureReason(reason);
+        persistTransition(record);
+        return record;
+    }
+
+    /**
+     * 消费或结算结果不确定时保留冻结，并持久化待核对状态。
+     * 必须由其他服务通过 Spring 代理调用；结算事务退出后再调用，避免持有账单锁时等待新事务。
+     * 原因应为安全的业务说明，不得直接传入包含凭证的上游异常全文。
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public BillingRecord markReconciliationRequired(Long recordId, String reason) {
+        if (reason == null || reason.isBlank() || reason.length() > 500) {
+            throw new BizException(400, "核对原因不能为空且不能超过500个字符");
+        }
+        BillingRecord record = lockRecord(recordId);
+        if (record.getStatus() == BillingRecord.Status.SETTLED
+                || record.getStatus() == BillingRecord.Status.RELEASED
+                || record.getStatus() == BillingRecord.Status.RECONCILIATION_REQUIRED) {
+            // 已完成的账单不降级；重复标记不覆盖首次原因，也不改变任何金额。
+            return record;
+        }
+        if (record.getStatus() != BillingRecord.Status.PROCESSING) {
+            throw new BizException(409, "账单状态异常，不能标记待核对");
+        }
+        // 即使冻结字段异常也要保存待核对证据，不能通过退款掩盖异常。
+        record.setStatus(BillingRecord.Status.RECONCILIATION_REQUIRED);
+        record.setFailureReason(reason);
+        persistTransition(record);
+        return record;
+    }
+
+    private BillingRecord lockRecord(Long recordId) {
+        if (recordId == null || recordId <= 0) {
+            throw new BizException(400, "账单编号必须为正数");
+        }
+        BillingRecord record = billingRecordMapper.selectByIdForUpdate(recordId);
+        if (record == null) {
+            throw new BizException(404, "账单不存在");
+        }
+        return record;
+    }
+
+    private void requireProcessing(BillingRecord record) {
+        if (record.getStatus() != BillingRecord.Status.PROCESSING) {
+            throw new BizException(409, "账单不是处理中状态，不能结算或释放");
+        }
+        if (record.getFrozenAmount() == null || record.getFrozenAmount() <= 0) {
+            throw new BizException(409, "账单冻结金额异常，请核对账务");
+        }
+    }
+
+    private void persistTransition(BillingRecord record) {
+        if (billingRecordMapper.updateById(record) != 1) {
+            // 异常必须穿过事务边界，使余额变化与账单变化一起回滚。
+            throw new BizException(409, "账单状态保存失败，事务回滚");
+        }
     }
 
     /**
@@ -206,21 +423,25 @@ public class BillingService {
      *      ——包括第②步的扣费也回滚，钱绝不会多扣（存储层兜底的威力）
      *
      * @param requestModel 用户请求的模型（指纹用）
+     * @param maxTokens    请求的输出上限（指纹用；null 按默认值归一化）
+     * @param stream       是否流式请求（指纹用；null 按 false 归一化）
      * @param servedModel  实际执行成功的模型（计价与流水记录用）
      * @return 计费流水（幂等命中返回首次记录；新扣费返回新记录）
      */
     @Transactional
     public BillingRecord deduct(Long appId, Long userId, String requestId, String requestModel,
+                                Integer maxTokens, Boolean stream,
                                 String servedModel, String messagesJson,
                                 int promptTokens, int completionTokens) {
-        String requestHash = buildRequestHash(appId, requestModel, messagesJson);
+        String requestHash = buildRequestHash(appId, requestModel, maxTokens, stream, messagesJson);
+        String legacyHash = buildLegacyRequestHash(appId, requestModel, messagesJson);
         long cost = calcCost((long) promptTokens + completionTokens, servedModel);
 
         // ① 快路径：幂等命中直接返回（省一次异常开销；并发漏网由④的唯一索引兜底）
         BillingRecord existing = billingRecordMapper.selectOne(new LambdaQueryWrapper<BillingRecord>()
                 .eq(BillingRecord::getRequestId, requestId));
         if (existing != null) {
-            if (!existing.getRequestHash().equals(requestHash)) {
+            if (!requestHashMatches(existing.getRequestHash(), requestHash, legacyHash)) {
                 // 同键不同业务：客户端 bug 或攻击，Stripe 同款行为
                 throw new BizException(409, "幂等键冲突：同一 Request-Id 被不同请求使用");
             }

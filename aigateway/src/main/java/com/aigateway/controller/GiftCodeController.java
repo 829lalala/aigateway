@@ -1,6 +1,7 @@
 package com.aigateway.controller;
 
 import com.aigateway.common.Result;
+import com.aigateway.common.AdminOnly;
 import com.aigateway.common.UserContext;
 import com.aigateway.service.GiftCodeService;
 import lombok.RequiredArgsConstructor;
@@ -25,6 +26,7 @@ public class GiftCodeController {
 
     /** 导入礼包码：POST /gift-codes/import  {"codes":["A1","A2","A3"]}（管理动作，活动开跑前） */
     @PostMapping("/import")
+    @AdminOnly
     public Result<Integer> importCodes(@RequestBody Map<String, List<String>> body) {
         return Result.ok(giftCodeService.importCodes(body.get("codes")));
     }

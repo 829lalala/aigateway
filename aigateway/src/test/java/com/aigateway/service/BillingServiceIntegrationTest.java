@@ -12,6 +12,11 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -41,6 +46,76 @@ class BillingServiceIntegrationTest {
     @Autowired
     private StringRedisTemplate stringRedisTemplate;
 
+    @Autowired
+    private PlatformTransactionManager transactionManager;
+
+    @Test
+    @Transactional
+    @DisplayName("数据库冻结账务：冻结、结算与释放幂等")
+    void databaseFrozenBillingLifecycle() {
+        // 测试结束由外层测试事务回滚，不改变已有用户或账单。
+        User user = frozenTestUser();
+        BillingRecord first = billingService.createPending(999L, user.getId(),
+                UUID.randomUUID().toString(), "glm-4-flash", "[]", 200L);
+        assertEquals(BillingRecord.Status.PROCESSING,
+                billingRecordMapper.selectById(first.getId()).getStatus());
+        assertEquals(200L, userMapper.selectById(user.getId()).getFrozenBalance());
+        assertEquals(10000L, userMapper.selectById(user.getId()).getBalance());
+
+        billingService.settlePending(first.getId(), 1L);
+        billingService.settlePending(first.getId(), 1L);
+        BillingRecord settled = billingRecordMapper.selectById(first.getId());
+        assertEquals(BillingRecord.Status.SETTLED, settled.getStatus());
+        assertEquals(1L, settled.getActualCost());
+        assertEquals(9999L, settled.getBalanceAfter());
+        assertEquals(9999L, userMapper.selectById(user.getId()).getBalance());
+        assertEquals(0L, userMapper.selectById(user.getId()).getFrozenBalance());
+
+        BillingRecord second = billingService.createPending(999L, user.getId(),
+                UUID.randomUUID().toString(), "glm-4-flash", "[]", 200L);
+        billingService.releasePending(second.getId(), "测试确认无消费");
+        billingService.releasePending(second.getId(), "测试确认无消费");
+        assertEquals(BillingRecord.Status.RELEASED,
+                billingRecordMapper.selectById(second.getId()).getStatus());
+        assertEquals(9999L, userMapper.selectById(user.getId()).getBalance());
+        assertEquals(0L, userMapper.selectById(user.getId()).getFrozenBalance());
+    }
+
+    @Test
+    @Transactional
+    @DisplayName("数据库事务：冻结和账单写入后故意失败，两者一起回滚")
+    void frozenRequestRollsBackWithTransaction() {
+        User user = frozenTestUser();
+        String requestId = UUID.randomUUID().toString();
+        TransactionTemplate nested = new TransactionTemplate(transactionManager);
+        // 嵌套事务使用数据库保存点：外层保留测试用户，内层失败撤销冻结和账单。
+        nested.setPropagationBehavior(
+                org.springframework.transaction.TransactionDefinition.PROPAGATION_NESTED);
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> nested.execute(status -> {
+                    billingService.createPending(999L, user.getId(), requestId,
+                            "glm-4-flash", "[]", 200L);
+                    throw new IllegalStateException("测试主动触发回滚");
+                }));
+        assertEquals("测试主动触发回滚", failure.getMessage());
+        assertEquals(0L, userMapper.selectById(user.getId()).getFrozenBalance());
+        assertEquals(10000L, userMapper.selectById(user.getId()).getBalance());
+        assertEquals(0L, billingRecordMapper.selectCount(new LambdaQueryWrapper<BillingRecord>()
+                .eq(BillingRecord::getRequestId, requestId)));
+    }
+
+    private User frozenTestUser() {
+        String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+        User user = new User();
+        user.setUsername("it_frozen_" + suffix);
+        user.setPassword("integration-test-placeholder");
+        user.setEmail("it_frozen_" + suffix + "@test.local");
+        user.setBalance(10000L);
+        user.setFrozenBalance(0L);
+        userMapper.insert(user);
+        return user;
+    }
+
     @Test
     @DisplayName("【双账本】预扣→MySQL 实扣→结算多退少补→两本账天然对齐；未初始化自愈；不足拒绝")
     void preDeductAndSettle() {
@@ -69,7 +144,8 @@ class BillingServiceIntegrationTest {
 
             // ③ 转发后按实际执行模型（glm-4-flash，单价 1）实扣 1 + 结算退回 199 → 两本账重新对齐
             billingService.deduct(999L, user.getId(), "it-bill5-" + suffix,
-                    "glm-4-flash", "glm-4-flash", "[{}]", 18, 11); // 实扣 cost=1
+                    "glm-4-flash", null, false,
+                    "glm-4-flash", "[{}]", 18, 11); // 实扣 cost=1
             billingService.settle(user.getId(), preCost, 1L);   // 退回 200-1=199（只退不补）
             assertEquals(9999L, billingService.getBalance(user.getId()));                        // MySQL: 10000-1
             assertEquals("9999", stringRedisTemplate.opsForValue().get(redisKey));               // Redis: 10000-200+199
@@ -109,21 +185,24 @@ class BillingServiceIntegrationTest {
         try {
             // ① 首次扣费：29 tokens → ceil(29/1000)=1 个千粒度 × 单价 1 = 1 万分之一元
             BillingRecord first = billingService.deduct(
-                    appId, user.getId(), requestId, "glm-4-flash", "glm-4-flash", messagesJson, 18, 11);
+                    appId, user.getId(), requestId, "glm-4-flash", null, false,
+                    "glm-4-flash", messagesJson, 18, 11);
             assertEquals(1L, first.getCost(), "29 tokens 按 (29+999)/1000=1 个粒度计费");
             assertEquals(9999L, first.getBalanceAfter(), "余额快照 = 10000 - 1");
             assertEquals(9999L, billingService.getBalance(user.getId()));
 
             // ② 同键同指纹重试（模拟客户端超时重发）→ 幂等命中：同一条流水、余额不再减少
             BillingRecord retry = billingService.deduct(
-                    appId, user.getId(), requestId, "glm-4-flash", "glm-4-flash", messagesJson, 18, 11);
+                    appId, user.getId(), requestId, "glm-4-flash", null, false,
+                    "glm-4-flash", messagesJson, 18, 11);
             assertEquals(first.getId(), retry.getId(), "幂等命中必须返回首次流水");
             assertEquals(9999L, billingService.getBalance(user.getId()), "重试绝不能二次扣费");
 
             // ③ 同键不同参数 → 409（客户端 bug/攻击，Stripe 同款行为）
             BizException conflict = assertThrows(BizException.class,
                     () -> billingService.deduct(appId, user.getId(), requestId,
-                            "glm-4-flash", "glm-4-flash", "[{\"role\":\"user\",\"content\":\"different\"}]", 18, 11));
+                            "glm-4-flash", null, false,
+                            "glm-4-flash", "[{\"role\":\"user\",\"content\":\"different\"}]", 18, 11));
             assertEquals(409, conflict.getCode());
 
             // ④ 余额不足：清零余额再扣 → 403，且事务回滚不留下流水
@@ -132,7 +211,8 @@ class BillingServiceIntegrationTest {
             String rid2 = "it-bill-insufficient-" + suffix;
             BizException insufficient = assertThrows(BizException.class,
                     () -> billingService.deduct(appId, user.getId(), rid2,
-                            "glm-4-flash", "glm-4-flash", messagesJson, 18, 11));
+                            "glm-4-flash", null, false,
+                            "glm-4-flash", messagesJson, 18, 11));
             assertEquals(403, insufficient.getCode());
             assertTrue(billingRecordMapper.selectList(new LambdaQueryWrapper<BillingRecord>()
                             .eq(BillingRecord::getRequestId, rid2)).isEmpty(),

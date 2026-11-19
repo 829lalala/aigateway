@@ -1,6 +1,7 @@
 package com.aigateway.controller;
 
 import com.aigateway.common.Result;
+import com.aigateway.common.AdminOnly;
 import com.aigateway.dto.RateLimitUpdateRequest;
 import com.aigateway.interceptor.RateLimitConfigProvider;
 import jakarta.validation.Valid;
@@ -23,7 +24,7 @@ import java.util.Map;
  * 生效路径：PUT 写 Redis 配置键 → invalidate 本地缓存 → 下一次请求 provider 重读 Redis
  * （单实例 PUT-GET-立即一致；多实例场景其他实例 ≤5s TTL 后生效——水平扩展的一致性取舍）
  *
- * 权限演进点：当前任何登录用户可改（无角色体系）；生产必须挂管理员角色/操作审计
+ * 修改配置仅限管理员，查询仍允许已登录用户；操作审计尚未实现。
  */
 @RestController
 @RequiredArgsConstructor
@@ -47,6 +48,7 @@ public class RateLimitController {
 
     /** 部分更新限流配置：写 Redis 配置键（动态生效，不重启）+ 失效本地缓存 */
     @PutMapping
+    @AdminOnly
     public Result<Map<String, Object>> update(@Valid @RequestBody RateLimitUpdateRequest req) {
         setIfNotNull(req.getCapacity(), "rate:config:capacity");
         setIfNotNull(req.getRate(), "rate:config:rate");

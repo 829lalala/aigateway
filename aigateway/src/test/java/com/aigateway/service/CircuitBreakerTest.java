@@ -84,7 +84,8 @@ class CircuitBreakerTest {
         when(billing.estimatePreCost(null)).thenReturn(200L);
         when(billing.preDeduct(2L, 200L)).thenReturn(9800L);
         when(billing.deduct(eq(1L), eq(2L), eq("settled-query-failure"),
-                eq("test-model"), eq("test-model"), anyString(), eq(18), eq(11)))
+                eq("test-model"), any(), eq(false),
+                eq("test-model"), anyString(), eq(18), eq(11)))
                 .thenReturn(record);
         IllegalStateException queryFailure = new IllegalStateException("模拟结算后的余额查询失败");
         when(billing.getBalance(2L)).thenThrow(queryFailure);
@@ -107,7 +108,8 @@ class CircuitBreakerTest {
                     "余额查询错误应继续传出，不能伪装成正常结果");
             server.verify();
             verify(billing).deduct(eq(1L), eq(2L), eq("settled-query-failure"),
-                    eq("test-model"), eq("test-model"), anyString(), eq(18), eq(11));
+                    eq("test-model"), any(), eq(false),
+                    eq("test-model"), anyString(), eq(18), eq(11));
             verify(billing).settle(2L, 200L, 1L);
             verify(billing, never()).settle(2L, 200L, 0L);
         } finally {

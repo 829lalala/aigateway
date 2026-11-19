@@ -19,6 +19,21 @@ import static org.mockito.Mockito.verify;
 class KafkaConsumerConfigTest {
 
     @Test
+    @SuppressWarnings("unchecked")
+    void deadLetterFactoryDoesNotUseBusinessDeadLetterRecovery() {
+        var configurer = mock(ConcurrentKafkaListenerContainerFactoryConfigurer.class);
+        var consumerFactory = mock(org.springframework.kafka.core.ConsumerFactory.class);
+        var factory = new KafkaConsumerConfig()
+                .deadLetterKafkaListenerContainerFactory(configurer, consumerFactory);
+        verify(configurer).configure(eq(factory), eq(consumerFactory));
+        org.junit.jupiter.api.Assertions.assertEquals(
+                org.springframework.kafka.listener.ContainerProperties.AckMode.RECORD,
+                factory.getContainerProperties().getAckMode());
+        assertInstanceOf(DefaultErrorHandler.class,
+                org.springframework.test.util.ReflectionTestUtils.getField(factory, "commonErrorHandler"));
+    }
+
+    @Test
     @DisplayName("错误处理器 Bean：DefaultErrorHandler（重试 → 死信兜底链）")
     @SuppressWarnings("unchecked")
     void errorHandler_isDefaultErrorHandler() {

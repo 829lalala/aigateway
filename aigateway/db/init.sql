@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS `user` (
     `email`       VARCHAR(64)  NOT NULL COMMENT '邮箱，找回密码用',
     `role`        TINYINT      NOT NULL DEFAULT 0 COMMENT '角色：0 普通用户，1 管理员',
     `balance`     BIGINT       NOT NULL DEFAULT 0 COMMENT '余额，单位：万分之一元（避免浮点误差）',
-    `frozen_balance` BIGINT    NOT NULL DEFAULT 0 COMMENT '冻结金额，单位：万分之一元；预留字段，计费流程尚未接入',
+    `frozen_balance` BIGINT    NOT NULL DEFAULT 0 COMMENT '冻结金额，单位：万分之一元',
     `deleted`     TINYINT      NOT NULL DEFAULT 0 COMMENT '逻辑删除：0 正常，1 已删除',
     `create_time` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     `update_time` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
@@ -66,7 +66,12 @@ CREATE TABLE IF NOT EXISTS `billing_record` (
     `prompt_tokens`     INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '输入 token 数',
     `completion_tokens` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '输出 token 数',
     `cost`              BIGINT       NOT NULL COMMENT '费用，万分之一元（与余额同单位）',
-    `balance_after`     BIGINT       NOT NULL COMMENT '扣费后余额快照（对账/追责用）',
+    `balance_after`     BIGINT       NULL COMMENT '扣费后余额快照（结算前为空）',
+    `status`            VARCHAR(32)  NOT NULL DEFAULT 'SETTLED' COMMENT '账单状态：PROCESSING/SETTLED/RELEASED/RECONCILIATION_REQUIRED',
+    `frozen_amount`     BIGINT       NOT NULL DEFAULT 0 COMMENT '冻结金额，万分之一元',
+    `actual_cost`       BIGINT       NULL COMMENT '实际结算费用，万分之一元',
+    `settled_time`      DATETIME     NULL COMMENT '结算完成时间',
+    `failure_reason`    VARCHAR(500) NULL COMMENT '失败或待核对原因',
     `deleted`           TINYINT      NOT NULL DEFAULT 0 COMMENT '逻辑删除：0 正常，1 已删除（流水表几乎不用）',
     `create_time`       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     `update_time`       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
@@ -75,6 +80,7 @@ CREATE TABLE IF NOT EXISTS `billing_record` (
     KEY `idx_app_id` (`app_id`),
     KEY `idx_user_id` (`user_id`),
     KEY `idx_user_model` (`user_id`, `model`)
+    ,KEY `idx_status_time` (`status`, `create_time`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT ='计费流水表';
 
 -- 帖子表（阶段 9：社区核心）
@@ -182,3 +188,25 @@ CREATE TABLE IF NOT EXISTS `summary_receipt` (
     KEY `idx_post` (`post_id`),
     KEY `idx_status` (`status`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT ='AI 摘要受理单表';
+
+-- 死信记录：投递状态不等于业务处理结果，不对记录做逻辑删除。
+CREATE TABLE IF NOT EXISTS `dead_letter_record` (
+    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键，自增',
+    `dlt_topic` VARCHAR(249) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT '死信主题，大小写敏感',
+    `dlt_partition` INT NOT NULL COMMENT '死信分区',
+    `dlt_offset` BIGINT NOT NULL COMMENT '死信消息位置',
+    `original_topic` VARCHAR(249) CHARACTER SET ascii COLLATE ascii_bin NULL COMMENT '原业务主题，无法确定时为空',
+    `message_key` TEXT NULL COMMENT '原消息键，允许为空',
+    `payload` MEDIUMTEXT NULL COMMENT '消息原文，保留坏消息和空消息',
+    `headers_json` JSON NULL COMMENT '消息头数组，保留重名头，二进制值使用 Base64 编码',
+    `failure_reason` TEXT NULL COMMENT '原始失败原因，未知时为空',
+    `status` VARCHAR(32) NOT NULL DEFAULT 'PENDING' COMMENT '投递状态：PENDING/RETRYING/REPUBLISHED/FAILED，不代表业务成功',
+    `retry_count` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '人工重新投递尝试次数',
+    `last_retry_time` DATETIME NULL COMMENT '最近一次重新投递尝试时间',
+    `last_error` TEXT NULL COMMENT '最近一次重新投递错误',
+    `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次保存时间',
+    `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_dlt_position` (`dlt_topic`, `dlt_partition`, `dlt_offset`),
+    KEY `idx_status_time` (`status`, `create_time`, `id`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '死信消息与人工重新投递记录';

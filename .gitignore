@@ -7,13 +7,46 @@
 **/application-local.properties
 **/config.local.properties
 
+# 根目录本地数据库备份；建表和迁移脚本仍保留在 aigateway/db 中提交
+/aigateway-before-*.sql
+
 # 简历（含个人信息，不入公共仓库）
 resume-*.md
 
+# 面试准备类文档（2026-11-19 决策）：不随源码公开
+# 说明：这类文档是个人学习底牌（阶段复盘、面试题答案、三岗位话术、
+# 简历描述模板），公开后等于把答案摊给面试官看，故整体排除。
+# 工程文档仍然保留：README.md、aigateway/docs/MULTI-INSTANCE-RECOVERY.md、
+# test-platform/perf/README.md。
+# 注意：该规则只影响之后的 git add；已经在历史里的旧版本需要用
+# git filter-branch 重写才能彻底清除（本次已执行）。
+/agents.md
+aigateway/docs/STAGE-*.md
+aigateway/docs/ROADMAP.md
+aigateway/docs/REVIEW-ROADMAP.md
+aigateway/docs/interview/
+
+# 面试备战工作目录（2026-11-19 决策）：个人学习记录，不公开
+.grill/
+
 # 日志与临时测试结果
 *.log
-*.jtl
 *.dump
+
+# 压测原始工件（L0 证据）：默认忽略，但**新版修正计划产出的 JTL 必须入库**
+# 原因（2026-11-18 决策）：547 QPS 事故的根源是丢了原始工件，只能靠文档复述，
+# 一旦文档错了就无从裁决。results-v2.jtl / chat-vt.jtl 是"可复现证据"的载体，
+# 内容只有时间戳/响应码/延迟/字节数，不含凭据，故显式放行；其余临时 JTL 仍忽略。
+*.jtl
+!test-platform/perf/results-v2.jtl
+!test-platform/perf/results-v2-baseline.jtl
+# 虚拟线程 A/B 对照（2026-11-18 实测补充）：
+#   chat-vt-baseline.jtl = A 组平台线程（threads.max=20）
+#   chat-vt.jtl          = B 组虚拟线程
+#   两组同时入库，才能证明"唯一变量是线程模型"——只留一组等于没有对照组，
+#   这正是历史上"+33% 无法复现"的原因（A 组工件曾缺失）。
+!test-platform/perf/chat-vt-baseline.jtl
+!test-platform/perf/chat-vt.jtl
 
 # IDE
 .idea/
@@ -34,3 +67,7 @@ test-platform/perf/vt-keys.csv
 
 # JMeter HTML 报告产物（本地证据，含大量第三方静态资源）
 test-platform/perf/report/
+
+# Windows/MSYS 保留设备名：shell 里重定向到这个名字会产生伪文件，
+# 不属于项目内容（历史上从未入库，此处只是防止误 add）
+/CON

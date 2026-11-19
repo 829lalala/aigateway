@@ -106,13 +106,31 @@ public class RateLimitInterceptor implements HandlerInterceptor {
         log.info("[RL] appId={}, capacity={}, rate={}, globalCap={}, globalRate={}",
                 appId, config.capacity(), config.rate(), config.globalCapacity(), config.globalRate());
 
-        Long result = redisTemplate.execute(
-                LAYERED_BUCKET_SCRIPT,
-                List.of(
-                        "rate:global:tokens", "rate:global:last",      // 全局桶（所有 Key 共享）
-                        "rate:apikey:tokens:" + appId, "rate:apikey:last:" + appId), // 租户桶
-                String.valueOf(config.globalRate()), String.valueOf(config.globalCapacity()),
-                String.valueOf(config.rate()), String.valueOf(config.capacity()));
+        Long result;
+        try {
+            result = redisTemplate.execute(
+                    LAYERED_BUCKET_SCRIPT,
+                    List.of(
+                            "rate:global:tokens", "rate:global:last",      // 全局桶（所有 Key 共享）
+                            "rate:apikey:tokens:" + appId, "rate:apikey:last:" + appId), // 租户桶
+                    String.valueOf(config.globalRate()), String.valueOf(config.globalCapacity()),
+                    String.valueOf(config.rate()), String.valueOf(config.capacity()));
+        } catch (Exception e) {
+            // E 项修复：限流器依赖 Redis，Redis 故障时选择 fail-open（放行）而非崩溃。
+            //
+            // 为什么是 fail-open 而不是 fail-close：
+            //   限流在本项目里是「保护上游 LLM 成本」的加速层，不是身份与账务的权威层。
+            //   它的定位是"尽量挡住超额调用"，而不是"没有它就不能服务"。
+            //   若选 fail-close，Redis 就从加速组件变成必需组件——可用性被一个缓存组件绑死。
+            //
+            // 为什么 fail-open 不会打开白嫖通道：
+            //   真正的成本护栏在下游的预扣环节（BillingService.preDeduct 走 Redis Lua），
+            //   那里 Redis 不可用会明确抛 500 并中止请求，不会"放行到扣不了钱的链路"。
+            //   也就是说：限流放行只意味着"这一层没挡住"，扣费那一层仍然会挡。
+            log.warn("限流器不可用，本次请求放行（fail-open）: appId={}, 原因={}",
+                    appId, e.getMessage());
+            return true;
+        }
 
         if (result == null || result < 0) {
             long waitMs = result == null ? 1000 : -result;

@@ -160,8 +160,10 @@
 					<plugin>
 						<groupId>org.apache.maven.plugins</groupId>
 						<artifactId>maven-surefire-plugin</artifactId>
-						<configuration>
+						<!-- 整体替换默认配置，避免继承“排除集成测试”导致所有测试被过滤。 -->
+						<configuration combine.self="override">
 							<groups>integration</groups>
+							<failIfNoTests>true</failIfNoTests>
 						</configuration>
 					</plugin>
 				</plugins>

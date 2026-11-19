@@ -44,6 +44,9 @@ public class User {
     /** 余额，单位：万分之一元（整数存储避免浮点误差） */
     private Long balance;
 
+    /** 冻结金额，单位：万分之一元；处理中请求暂时占用但尚未消费的金额 */
+    private Long frozenBalance;
+
     /**
      * 逻辑删除标记：0 正常，1 已删除
      * @TableLogic 生效后：

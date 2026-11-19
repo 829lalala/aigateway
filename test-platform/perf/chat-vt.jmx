@@ -26,7 +26,10 @@
       </ThreadGroup>
       <hashTree>
         <CSVDataSet guiclass="TestBeanGUI" testclass="CSVDataSet" testname="vt-keys.csv" enabled="true">
-          <stringProp name="filename">D:/young/JavaCode/new/test-platform/perf/vt-keys.csv</stringProp>
+          <!-- 2026-11-18 修复：原为硬编码绝对路径，换机器即失效。
+               改为属性引用 ${__P(vt-keys.csv,vt-keys.csv)}，可用 -Jvt-keys.csv=路径 覆盖。
+               vt-keys.csv 含真实 API Key，已被 .gitignore 忽略，仓库内只有 .example 样例。 -->
+          <stringProp name="filename">${__P(vt-keys.csv,vt-keys.csv)}</stringProp>
           <stringProp name="fileEncoding">UTF-8</stringProp>
           <stringProp name="variableNames">username,apiKey</stringProp>
           <boolProp name="ignoreFirstLine">true</boolProp>
@@ -84,43 +87,12 @@
           </HeaderManager>
           <hashTree/>
         </hashTree>
-        <ResultCollector guiclass="SimpleDataWriter" testclass="ResultCollector" testname="Raw Data" enabled="true">
-          <boolProp name="ResultCollector.error_logging">false</boolProp>
-          <objProp>
-            <name>saveConfig</name>
-            <value class="SampleSaveConfiguration">
-              <time>true</time>
-              <latency>true</latency>
-              <timestamp>true</timestamp>
-              <success>true</success>
-              <label>true</label>
-              <code>true</code>
-              <message>true</message>
-              <threadName>true</threadName>
-              <dataType>true</dataType>
-              <encoding>false</encoding>
-              <assertions>true</assertions>
-              <subresults>true</subresults>
-              <responseData>false</responseData>
-              <samplerData>false</samplerData>
-              <xml>false</xml>
-              <fieldNames>true</fieldNames>
-              <responseHeaders>false</responseHeaders>
-              <requestHeaders>false</requestHeaders>
-              <responseDataOnError>false</responseDataOnError>
-              <saveAssertionResultsFailureMessage>true</saveAssertionResultsFailureMessage>
-              <assertionsResultsToSave>0</assertionsResultsToSave>
-              <bytes>true</bytes>
-              <sentBytes>true</sentBytes>
-              <url>true</url>
-              <threadCounts>true</threadCounts>
-              <idleTime>true</idleTime>
-              <connectTime>true</connectTime>
-            </value>
-          </objProp>
-          <stringProp name="filename">D:/young/JavaCode/new/test-platform/perf/chat-vt.jtl</stringProp>
-        </ResultCollector>
-        <hashTree/>
+        <!-- 2026-11-18 修复：此处原有 ResultCollector（SimpleDataWriter），
+             filename 写死 chat-vt.jtl。它与命令行 -l 参数同指一个文件时，
+             每个请求会被写入两行（JMeter 双写），导致"吞吐量分子翻倍"——
+             这正是 547 QPS 事故的成因（历史 chat-vt.jtl 也是 80 行 / 40 唯一请求）。
+             删除后统一由 CLI -l 指定输出文件，保证单一写入方。
+             保存字段由 chat-vt.properties 声明。 -->
       </hashTree>
     </hashTree>
   </hashTree>

@@ -129,9 +129,14 @@ public class ChatService {
             int completionTokens = ((Number) usage.get("completion_tokens")).intValue();
 
             // ③ 权威扣费：指纹绑定请求模型（跨重试稳定），计价与流水绑定实际执行模型
+            //    指纹同时纳入 maxTokens 与 stream（B 项修复）：上游调用发生在扣费之前，
+            //    幂等命中只阻止扣费、不阻止再次调用模型。指纹漏掉 maxTokens 时，
+            //    同键用小 max_tokens 提交一次、再用大值重提，第二次仍会真实调用上游
+            //    并拿到大额响应，却被判为幂等命中——形成"花一份钱拿两份 token"的白嫖窗口。
             String messagesJson = CHAT_JSON.writeValueAsString(request.getMessages());
             BillingRecord record = billingService.deduct(appId, userId, requestId,
-                    requestedModel, servedModel, messagesJson, promptTokens, completionTokens);
+                    requestedModel, request.getMaxTokens(), false,
+                    servedModel, messagesJson, promptTokens, completionTokens);
             deductionCompleted = true;
 
             // ④ 结算：预扣按链上最贵 → 实扣必然 ≤ 预扣 → 只退不补
@@ -350,11 +355,20 @@ public class ChatService {
 
             String messagesJson = CHAT_JSON.writeValueAsString(request.getMessages());
             BillingRecord record = billingService.deduct(appId, userId, requestId,
-                    requestedModel, requestedModel, messagesJson,
+                    requestedModel, request.getMaxTokens(), true,
+                    requestedModel, messagesJson,
                     (int) promptTokens, (int) completionTokens);
-            billingService.settle(userId, preCost, record.getCost());
-            log.info("流式计费完成: requestId={}, prompt={}, completion={}, cost={}, estimated={}",
-                    requestId, promptTokens, completionTokens, record.getCost(), estimated);
+
+            // ④ 结算：幂等命中时 MySQL 未产生新扣费，Redis 也必须全额退还预扣
+            // 与非流式（:137-140）同口径。漏掉这一分支会让 Redis 热账本每重试一次就
+            // 多扣一笔，而 MySQL 账单没扣——两个账本持续背离，且不报错、不告警。
+            boolean idempotentHit = Boolean.TRUE.equals(record.getIdempotentHit());
+            long chargedCost = idempotentHit ? 0L : record.getCost();
+            billingService.settle(userId, preCost, chargedCost);
+            log.info("流式计费完成: requestId={}, prompt={}, completion={}, cost={}, chargedCost={}, "
+                            + "idempotentHit={}, estimated={}",
+                    requestId, promptTokens, completionTokens, record.getCost(), chargedCost,
+                    idempotentHit, estimated);
         } catch (Exception e) {
             // 结算失败：预扣保留（不退），ERROR 留痕待人工对账——比静默丢账安全
             log.error("流式结算异常（预扣保留待对账）: requestId={}, preCost={}, {}",

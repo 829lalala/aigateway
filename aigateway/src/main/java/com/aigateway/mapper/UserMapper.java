@@ -16,6 +16,29 @@ import org.apache.ibatis.annotations.Update;
 public interface UserMapper extends BaseMapper<User> {
 
     /**
+     * 原子冻结金额：检查可用余额（总余额-已冻结金额）并增加冻结金额。
+     * 影响行数 1 表示冻结成功，0 表示用户不存在或可用余额不足。
+     */
+    @Update("UPDATE user SET frozen_balance = frozen_balance + #{amount} "
+            + "WHERE id = #{userId} AND balance - frozen_balance >= #{amount}")
+    int freezeBalance(@Param("userId") Long userId, @Param("amount") long amount);
+
+    /** 结算成功：从总余额和冻结金额中同时扣除实际费用。 */
+    @Update("UPDATE user SET balance = balance - #{actualCost}, "
+            + "frozen_balance = frozen_balance - #{frozenAmount} "
+            + "WHERE id = #{userId} AND frozen_balance >= #{frozenAmount} "
+            + "AND balance >= #{actualCost}")
+    int settleFrozenBalance(@Param("userId") Long userId,
+                            @Param("frozenAmount") long frozenAmount,
+                            @Param("actualCost") long actualCost);
+
+    /** 明确失败时释放冻结金额，不改变总余额。 */
+    @Update("UPDATE user SET frozen_balance = frozen_balance - #{frozenAmount} "
+            + "WHERE id = #{userId} AND frozen_balance >= #{frozenAmount}")
+    int releaseFrozenBalance(@Param("userId") Long userId,
+                             @Param("frozenAmount") long frozenAmount);
+
+    /**
      * 原子条件扣费（防超扣的唯一正确姿势）
      *
      * "读余额→判断→扣减"合并为一条 SQL：InnoDB 行锁内一次完成，无 TOCTOU 窗口。

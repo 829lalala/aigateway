@@ -6,6 +6,7 @@ import io.restassured.response.Response;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Tag;
+import com.testplatform.config.TestConfig;
 
 import java.util.List;
 import java.util.Map;
@@ -34,6 +35,8 @@ class SeckillFlowTest {
     @Test
     @DisplayName("秒杀剧本：2 码 3 用户 → 成功/防刷/额度尽三级语义 + 回滚可重试 + 到账对账")
     void seckillFullScenario() throws InterruptedException {
+        // 账号必须提前在本地数据库设为管理员，测试不能通过注册自行提权。
+        AuthFlows.LoginSession admin = AuthFlows.login(TestConfig.username(), TestConfig.password());
         AuthFlows.LoginSession userA = AuthFlows.registerAndLogin();
         AuthFlows.LoginSession userB = AuthFlows.registerAndLogin();
         AuthFlows.LoginSession userC = AuthFlows.registerAndLogin();
@@ -42,6 +45,8 @@ class SeckillFlowTest {
         String prefix = "TP" + Long.toHexString(System.currentTimeMillis());
         List<String> codes = List.of(prefix + "A", prefix + "B");
         userA.client().post("/gift-codes/import", Map.of("codes", codes))
+                .then().statusCode(403).body("code", equalTo(403));
+        admin.client().post("/gift-codes/import", Map.of("codes", codes))
                 .then().statusCode(200).body("code", equalTo(0));
 
         // 2. userA 首抢 → 成功（异步到账）
