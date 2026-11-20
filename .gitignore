@@ -71,3 +71,6 @@ test-platform/perf/report/
 # Windows/MSYS 保留设备名：shell 里重定向到这个名字会产生伪文件，
 # 不属于项目内容（历史上从未入库，此处只是防止误 add）
 /CON
+
+# 临时工具目录（git-filter-repo 等，不入库）
+.tools/
