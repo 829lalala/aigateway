@@ -34,7 +34,7 @@
 
 > ⚠️ **修正注记（2026-10-29 复核，原文保留）**：上句的 `547 QPS` **不可用**。它取自 JMeter 自动生成的 `statistics.json`，而该文件用 400 行日志作分子——测试计划内手写的 `ResultCollector` 与命令行 `-l` 参数指向同一文件，每个请求被写两次，唯一请求只有 200 条。按原始工件复算：**200 唯一请求 / 0.731 秒样本跨度 = 273.6 请求/秒**；若用 JMeter 测试总时长 1.146 秒作分母则为 174.5 请求/秒。两个值都对，差别只在口径，**547 错在分子**。
 > 另：`P95 = 117ms` 是成功与被拒两类请求的混合分位（成功 100 条 P95=119ms、被拒 100 条 P95=8ms）；`HTTP 0 错误` 仅验证了状态码（业务失败也返回 HTTP 200）；`0 超卖` 需要数据库对账快照才能证明，仓库内暂无留档。
-> 复算脚本：[.grill/verify-perf.sh](.grill/verify-perf.sh)（只读磁盘，不调用任何模型）。裁决规则见 [AGENTS.md](AGENTS.md)。
+> 复算脚本仅保留在本地工作副本中（只读磁盘，不调用任何模型）；裁决规则同 `.gitignore` 与提交说明中所述。
 
 ## 项目组成
 
@@ -62,7 +62,7 @@ cd aigateway
 mvn spring-boot:run
 ```
 
-旧数据库升级：新的空数据库通过 `aigateway/db/init.sql` 建表；已有数据卷不会自动重跑初始化脚本。升级前备份并停止应用接收请求，先检查现有表结构，再执行 [计费字段迁移](aigateway/db/migration-001-billing-state.sql) 和 [死信建表迁移](aigateway/db/migration-002-dead-letter-record.sql)。计费迁移不是可重复执行脚本：若 `user.frozen_balance` 已存在，跳过对应的新增列语句；若账单字段或索引也已存在，需逐项核对并只执行缺失部分，不能整份重跑或忽略报错继续。检查方法见 [计费升级说明](aigateway/docs/STAGE-5.md)。仅修改初始化脚本无法升级已有表。新增冻结账务方法尚未接入实际聊天入口，当前聊天仍走原有预扣与结算流程。
+旧数据库升级：新的空数据库通过 `aigateway/db/init.sql` 建表；已有数据卷不会自动重跑初始化脚本。升级前备份并停止应用接收请求，先检查现有表结构，再执行 [计费字段迁移](aigateway/db/migration-001-billing-state.sql) 和 [死信建表迁移](aigateway/db/migration-002-dead-letter-record.sql)。计费迁移不是可重复执行脚本：若 `user.frozen_balance` 已存在，跳过对应的新增列语句；若账单字段或索引也已存在，需逐项核对并只执行缺失部分，不能整份重跑或忽略报错继续。检查方法见上文「计费状态机」一节的说明。仅修改初始化脚本无法升级已有表。新增冻结账务方法尚未接入实际聊天入口，当前聊天仍走原有预扣与结算流程。
 
 启动后先检查健康接口：
 
@@ -194,9 +194,9 @@ Invoke-RestMethod -Method Post -Uri "$baseUrl/admin/dead-letters/$deadLetterId/r
 
 死信消费者组（共同分担消息处理的一组消费者）默认为 `aigateway-dlt`，可通过 `dead-letter.consumer-group` 配置。验证新版本时可使用独立组，避免旧实例分走测试消息；新组会从尚未过期的历史消息开始读取，并通过数据库唯一约束避免重复保存。日常启动应保持组名稳定。
 
-- [后端开发版本](aigateway/docs/interview/backend.md)：主要求职方向，三条核心链路的叙事与边界
+## 相关设计与文档
+
 - [多实例故障恢复设计](aigateway/docs/MULTI-INSTANCE-RECOVERY.md)：状态分布、故障窗口、人工恢复步骤和待执行的双实例演练；不代表已具备生产级容灾
-- [测试开发版本](aigateway/docs/interview/test-development.md)：接口自动化、质量保障和性能测试
-- [游戏客户端版本](aigateway/docs/interview/game-client.md)：Android 客户端和人工智能流式交互
-- [项目总蓝图（ROADMAP）](aigateway/docs/ROADMAP.md)：阶段规划、简历描述模板、三岗位话术
-- [阶段复盘文档](aigateway/docs/STAGE-1.md)：各阶段知识点、面试题、陷阱实录（STAGE-1 ~ STAGE-20）
+- [压测目录说明](test-platform/perf/README.md)：Apache JMeter 测试计划与原始工件（L0 证据）的使用方式
+
+> 项目复盘、阶段笔记与各岗位叙事属个人学习资料，不随本仓库公开。
